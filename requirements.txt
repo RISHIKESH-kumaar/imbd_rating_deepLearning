@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+tensorflow
+nltk
+numpy
+pydantic
+streamlit
