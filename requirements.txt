@@ -1,7 +1,4 @@
-fastapi
-uvicorn[standard]
+streamlit
 tensorflow
 nltk
 numpy
-pydantic
-streamlit
