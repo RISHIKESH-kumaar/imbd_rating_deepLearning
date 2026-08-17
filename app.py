@@ -1,18 +1,92 @@
+"""
+app.py
+
+Standalone Streamlit app for IMDB sentiment analysis.
+Loads the trained LSTM model and tokenizer directly (no separate
+FastAPI backend needed).
+"""
+
+import re
+import pickle
+
 import streamlit as st
-import requests
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 
 # ---------------------------------------------------------------------------
-# Config
+# NLTK setup
 # ---------------------------------------------------------------------------
-API_URL = "http://127.0.0.1:8000/predict"  # your FastAPI server must be running
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
 
-st.set_page_config(page_title="IMDB Sentiment Analysis", page_icon="🎬", layout="centered")
+lemmatizer = WordNetLemmatizer()
+stop_words = set(stopwords.words('english'))
+negation_words = {
+    "not", "no", "nor", "never", "none", "neither",
+    "cannot", "n't", "without", "against"
+}
+stop_words = stop_words - negation_words
+
+MAX_LEN = 200
+MODEL_PATH = "sentiment_lstm_model.h5"
+TOKENIZER_PATH = "tokenizer.pickle"
+
+
+# ---------------------------------------------------------------------------
+# Load model + tokenizer once, cached
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def load_artifacts():
+    model = load_model(MODEL_PATH)
+    with open(TOKENIZER_PATH, "rb") as f:
+        tokenizer = pickle.load(f)
+    return model, tokenizer
+
+
+model, tokenizer = load_artifacts()
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing — must match training pipeline exactly
+# ---------------------------------------------------------------------------
+def clean_text(text: str, remove_stopwords: bool = True, lemmatize: bool = True) -> str:
+    text = re.sub(r'<.*?>', ' ', text)
+    text = text.lower()
+
+    text = re.sub(r"won't", "will not", text)
+    text = re.sub(r"can't", "can not", text)
+    text = re.sub(r"n't", " not", text)
+    text = re.sub(r"'re", " are", text)
+    text = re.sub(r"'s", " is", text)
+    text = re.sub(r"'d", " would", text)
+    text = re.sub(r"'ll", " will", text)
+    text = re.sub(r"'ve", " have", text)
+    text = re.sub(r"'m", " am", text)
+
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    tokens = text.split()
+
+    if remove_stopwords:
+        tokens = [w for w in tokens if w not in stop_words]
+    if lemmatize:
+        tokens = [lemmatizer.lemmatize(w) for w in tokens]
+
+    return ' '.join(tokens)
+
 
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
+st.set_page_config(page_title="IMDB Sentiment Analysis", page_icon="🎬", layout="centered")
+
 st.title("🎬 IMDB Sentiment Analysis")
-st.write("Enter a movie review below and get a positive/negative sentiment prediction from your LSTM model.")
+st.write("Enter a movie review below and get a positive/negative sentiment prediction from an LSTM model.")
 
 review_text = st.text_area(
     "Movie review",
@@ -20,54 +94,27 @@ review_text = st.text_area(
     height=150
 )
 
-col1, col2 = st.columns([1, 4])
-with col1:
-    predict_clicked = st.button("Predict", type="primary")
+predict_clicked = st.button("Predict", type="primary")
 
-# ---------------------------------------------------------------------------
-# Prediction logic
-# ---------------------------------------------------------------------------
 if predict_clicked:
     if not review_text or not review_text.strip():
         st.warning("Please enter some review text first.")
     else:
         with st.spinner("Analyzing sentiment..."):
-            try:
-                response = requests.post(API_URL, json={"text": review_text}, timeout=10)
+            cleaned = clean_text(review_text)
+            sequence = tokenizer.texts_to_sequences([cleaned])
+            padded = pad_sequences(sequence, maxlen=MAX_LEN, padding='post', truncating='post')
 
-                if response.status_code == 200:
-                    result = response.json()
-                    sentiment = result["sentiment"]
-                    confidence = result["confidence"]
+            prob = float(model.predict(padded, verbose=0)[0][0])
+            sentiment = "positive" if prob >= 0.5 else "negative"
+            confidence = prob if sentiment == "positive" else 1 - prob
 
-                    if sentiment == "positive":
-                        st.success(f"**Positive** 😀 (confidence: {confidence:.2%})")
-                    else:
-                        st.error(f"**Negative** 😞 (confidence: {confidence:.2%})")
+        if sentiment == "positive":
+            st.success(f"**Positive** 😀 (confidence: {confidence:.2%})")
+        else:
+            st.error(f"**Negative** 😞 (confidence: {confidence:.2%})")
 
-                    st.progress(confidence)
+        st.progress(confidence)
 
-                    with st.expander("See cleaned text sent to the model"):
-                        st.code(result["cleaned_text"])
-
-                else:
-                    st.error(f"API returned an error (status {response.status_code}): {response.text}")
-
-            except requests.exceptions.ConnectionError:
-                st.error(
-                    "Could not connect to the FastAPI server. "
-                    "Make sure it's running with `uvicorn main:app --reload` on port 8000."
-                )
-            except requests.exceptions.Timeout:
-                st.error("The request timed out. The model may be taking too long to respond.")
-
-# ---------------------------------------------------------------------------
-# Footer / status check
-# ---------------------------------------------------------------------------
-st.divider()
-if st.button("Check API health"):
-    try:
-        health = requests.get("http://127.0.0.1:8000/health", timeout=5).json()
-        st.json(health)
-    except requests.exceptions.ConnectionError:
-        st.error("FastAPI server is not reachable.")
+        with st.expander("See cleaned text sent to the model"):
+            st.code(cleaned)
